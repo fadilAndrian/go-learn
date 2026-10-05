@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/fadilAndrian/go-learn/internal/merchant"
 	"github.com/fadilAndrian/go-learn/internal/user"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/recover"
@@ -68,7 +69,14 @@ func main() {
 
 	app.Post("/register", userHandler.Register)
 	app.Post("/login", userHandler.Login)
-	app.Get("/me", userHandler.Me, user.Auth(jwtSecret))
+	app.Get("/me", user.Auth(jwtSecret), userHandler.Me)
+
+	merchantHandler := merchant.NewHandler(merchant.NewService(merchant.NewRepository(db)))
+
+	app.Post("/merchants", merchantHandler.Register)
+	app.Get("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Detail)
+	app.Put("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Update)
+	app.Delete("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Delete)
 
 	// arahin ke port 3000
 	if err := app.Listen(":3000"); err != nil {
