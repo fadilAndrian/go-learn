@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -93,6 +94,28 @@ func (r *Repository) Update(ctx context.Context, id int64, from, status, provide
 		   updated_at = now()
 		 WHERE id = $1 AND ($2 = '' OR status = $2)`, id, from, status, providerRef, p)
 	return tag.RowsAffected() > 0, err
+}
+
+// ListPending lintas merchant: pending yang sudah dikirim ke PG dan tidak berubah sejak olderThan. Dipakai scheduler.
+func (r *Repository) ListPending(ctx context.Context, olderThan time.Time, limit int) ([]Transaction, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT `+columns+` FROM transactions
+		 WHERE status = 'pending' AND provider_ref IS NOT NULL AND updated_at < $1
+		 ORDER BY updated_at LIMIT $2`, olderThan, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := []Transaction{}
+	for rows.Next() {
+		var t Transaction
+		if err := scan(rows, &t); err != nil {
+			return nil, err
+		}
+		list = append(list, t)
+	}
+	return list, rows.Err()
 }
 
 // List status kosong = semua status.

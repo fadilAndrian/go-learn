@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -76,6 +77,35 @@ func (s *Service) CreateQRIS(ctx context.Context, merchantID int64, req CreateRe
 }
 
 // Check tanya status ke PG; hanya transaksi pending yang berubah (paid/refunded tidak ditimpa).
+// CheckPending query status ke PG untuk semua transaksi pending; error satu transaksi tidak menghentikan yang lain.
+func (s *Service) CheckPending(ctx context.Context) {
+	// ponytail: batch 100 per tick, tanpa lock antar-instance. Tambah kalau jalan >1 instance.
+	list, err := s.repository.ListPending(ctx, time.Now().Add(-60*time.Second), 100)
+	if err != nil {
+		slog.Warn("checker: list pending", "err", err)
+		return
+	}
+	for _, t := range list {
+		if _, err := s.Check(ctx, t.MerchantID, t.ID); err != nil {
+			slog.Warn("checker: check", "id", t.ID, "err", err)
+		}
+	}
+}
+
+// RunChecker jalankan CheckPending tiap every sampai ctx selesai.
+func (s *Service) RunChecker(ctx context.Context, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.CheckPending(ctx)
+		}
+	}
+}
+
 func (s *Service) Check(ctx context.Context, merchantID, id int64) (*Transaction, error) {
 	t, err := s.repository.FindByID(ctx, merchantID, id)
 	if err != nil || t.ProviderRef == "" {
