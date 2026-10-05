@@ -34,8 +34,8 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*User, erro
 	user := &User{}
 
 	err := r.db.QueryRow(ctx,
-		`SELECT id, name, email, password FROM users WHERE email = $1 AND deleted_at IS NULL`, email,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.Password)
+		`SELECT id, name, email, password, merchant_id FROM users WHERE email = $1 AND deleted_at IS NULL`, email,
+	).Scan(&user.ID, &user.Name, &user.Email, &user.Password, &user.MerchantID)
 
 	if err != nil {
 		return nil, err
