@@ -2,6 +2,7 @@ package transaction
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -61,6 +62,37 @@ func (r *Repository) FindByID(ctx context.Context, merchantID, id int64) (*Trans
 		return nil, err
 	}
 	return t, nil
+}
+
+// FindByReference tanpa scope merchant: dipakai webhook PG yang tidak punya konteks user.
+func (r *Repository) FindByReference(ctx context.Context, referenceNo string) (*Transaction, error) {
+	t := &Transaction{}
+	err := scan(r.db.QueryRow(ctx,
+		`SELECT `+columns+` FROM transactions WHERE reference_no = $1`, referenceNo), t)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// Update ubah status/provider_ref (string kosong = tidak diubah) dan merge patch ke additional_info.
+// from non-kosong = hanya jika status saat ini == from (guard idempotensi webhook); return false kalau tidak ada baris berubah.
+func (r *Repository) Update(ctx context.Context, id int64, from, status, providerRef string, patch map[string]any) (bool, error) {
+	p, _ := json.Marshal(patch) // nil map → "null"
+	if patch == nil {
+		p = []byte("{}")
+	}
+	tag, err := r.db.Exec(ctx,
+		`UPDATE transactions SET
+		   status = COALESCE(NULLIF($3, ''), status),
+		   provider_ref = COALESCE(NULLIF($4, ''), provider_ref),
+		   additional_info = COALESCE(additional_info, '{}'::jsonb) || $5::jsonb,
+		   updated_at = now()
+		 WHERE id = $1 AND ($2 = '' OR status = $2)`, id, from, status, providerRef, p)
+	return tag.RowsAffected() > 0, err
 }
 
 // List status kosong = semua status.
