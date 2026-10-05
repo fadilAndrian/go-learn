@@ -8,7 +8,9 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/fadilAndrian/go-learn/internal/apilog"
 	"github.com/fadilAndrian/go-learn/internal/merchant"
+	"github.com/fadilAndrian/go-learn/internal/transaction"
 	"github.com/fadilAndrian/go-learn/internal/user"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/recover"
@@ -70,6 +72,16 @@ func main() {
 	app.Post("/register", userHandler.Register)
 	app.Post("/login", userHandler.Login)
 	app.Get("/me", user.Auth(jwtSecret), userHandler.Me)
+
+	trxHandler := transaction.NewHandler(transaction.NewService(transaction.NewRepository(db)), userService, apilog.NewService(apilog.NewRepository(db)))
+
+	trx := app.Group("/transactions", user.Auth(jwtSecret))
+	trx.Post("/", trxHandler.Create)
+	trx.Get("/", trxHandler.List)
+	trx.Get("/:id", trxHandler.Get)
+	trx.Get("/:id/logs", trxHandler.Logs)
+
+	app.Get("/logs/:logId", user.Auth(jwtSecret), trxHandler.LogDetail)
 
 	merchantHandler := merchant.NewHandler(merchant.NewService(merchant.NewRepository(db)))
 

@@ -27,3 +27,9 @@ func Auth(secret string) func(fiber.Ctx) error {
 		return c.Next()
 	}
 }
+
+// UserID mengambil ID user yang disimpan Auth.
+func UserID(c fiber.Ctx) int64 {
+	id, _ := c.Locals(userIDKey).(int64)
+	return id
+}
