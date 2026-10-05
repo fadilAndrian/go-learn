@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 
 	"github.com/fadilAndrian/go-learn/internal/apilog"
+	"github.com/fadilAndrian/go-learn/internal/gateway"
 	"github.com/fadilAndrian/go-learn/internal/merchant"
 	"github.com/fadilAndrian/go-learn/internal/transaction"
 	"github.com/fadilAndrian/go-learn/internal/user"
@@ -69,22 +70,42 @@ func main() {
 	userService := user.NewService(userRepo, jwtSecret)
 	userHandler := user.NewHandler(userService)
 
+	// admin-api
 	app.Post("/register", userHandler.Register)
 	app.Post("/login", userHandler.Login)
 	app.Get("/me", user.Auth(jwtSecret), userHandler.Me)
 
-	trxHandler := transaction.NewHandler(transaction.NewService(transaction.NewRepository(db)), userService, apilog.NewService(apilog.NewRepository(db)))
+	// payment gateway: PG_BASE_URL kosong + PG_FAKE=true → pakai PG palsu bawaan di /fake-pg
+	pgBase := os.Getenv("PG_BASE_URL")
+	if pgBase == "" {
+		pgBase = "http://localhost:3000/fake-pg"
+	}
+	webhookSecret := os.Getenv("PG_WEBHOOK_SECRET")
+	if os.Getenv("PG_FAKE") == "true" {
+		gateway.RegisterFake(app, "http://localhost:3000/webhooks/qris/v1.0/qr/qr-mpm-notify", webhookSecret)
+	}
+
+	logs := apilog.NewService(apilog.NewRepository(db))
+	gw := gateway.NewClient(pgBase, os.Getenv("PG_PARTNER_ID"))
+	trxHandler := transaction.NewHandler(transaction.NewService(transaction.NewRepository(db), gw, logs), userService, logs)
+
+	// webhook dari PG: publik, auth lewat X-SIGNATURE
+	app.Post("/webhooks/qris/v1.0/qr/qr-mpm-notify", trxHandler.Notify(webhookSecret))
 
 	trx := app.Group("/transactions", user.Auth(jwtSecret))
-	trx.Post("/", trxHandler.Create)
+	trx.Post("/", trxHandler.CreateQRIS) // inbound create → otomatis outbound ke PG
+	// admin-api
 	trx.Get("/", trxHandler.List)
 	trx.Get("/:id", trxHandler.Get)
 	trx.Get("/:id/logs", trxHandler.Logs)
+	trx.Post("/:id/check", trxHandler.Check)
+	trx.Post("/:id/refund", trxHandler.Refund)
 
+	// admin-api
 	app.Get("/logs/:logId", user.Auth(jwtSecret), trxHandler.LogDetail)
 
 	merchantHandler := merchant.NewHandler(merchant.NewService(merchant.NewRepository(db)))
-
+	// admin-api
 	app.Post("/merchants", merchantHandler.Register)
 	app.Get("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Detail)
 	app.Put("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Update)

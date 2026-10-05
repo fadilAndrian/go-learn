@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fadilAndrian/go-learn/internal/apilog"
+	"github.com/fadilAndrian/go-learn/internal/gateway"
 	"github.com/fadilAndrian/go-learn/internal/user"
 	"github.com/gofiber/fiber/v3"
 )
@@ -31,44 +32,6 @@ func (h *Handler) merchantID(c fiber.Ctx) (int64, error) {
 		return 0, fiber.NewError(fiber.StatusForbidden, "user has no merchant")
 	}
 	return u.MerchantID, nil
-}
-
-func (h *Handler) Create(c fiber.Ctx) error {
-	merchantID, err := h.merchantID(c)
-	if err != nil {
-		return err
-	}
-
-	var request CreateRequest
-	if err := c.Bind().Body(&request); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
-	}
-
-	start := time.Now()
-	t, err := h.service.Create(c.Context(), merchantID, request)
-	if errors.Is(err, ErrInvalidAmount) {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
-	}
-	if errors.Is(err, ErrReferenceInUse) {
-		return fiber.NewError(fiber.StatusConflict, err.Error())
-	}
-	if err != nil {
-		return err
-	}
-
-	response, _ := json.Marshal(t)
-	h.logs.Record(c.Context(), apilog.Log{
-		TransactionID: t.ID,
-		Type:          apilog.InboundCreate,
-		Method:        c.Method(),
-		URL:           c.OriginalURL(),
-		RequestBody:   json.RawMessage(c.Body()),
-		ResponseBody:  response,
-		StatusCode:    fiber.StatusCreated,
-		DurationMs:    int(time.Since(start).Milliseconds()),
-	})
-
-	return c.Status(fiber.StatusCreated).JSON(t)
 }
 
 func (h *Handler) List(c fiber.Ctx) error {
@@ -155,6 +118,146 @@ func (h *Handler) LogDetail(c fiber.Ctx) error {
 		return err
 	}
 	return c.JSON(l)
+}
+
+// outboundErr memetakan error service outbound ke HTTP: PG bermasalah → 502.
+func outboundErr(err error) error {
+	switch {
+	case errors.Is(err, ErrInvalidAmount):
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrNotFound):
+		return fiber.NewError(fiber.StatusNotFound, err.Error())
+	case errors.Is(err, ErrNotRefundable):
+		return fiber.NewError(fiber.StatusConflict, err.Error())
+	case errors.Is(err, gateway.ErrGateway):
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+	return err
+}
+
+// logInbound mencatat request client → kita (sisi inbound), berpasangan dengan log outbound ke PG.
+// t boleh nil (transaksi belum terbentuk) → tidak dicatat karena api_logs butuh transaction_id.
+func (h *Handler) logInbound(c fiber.Ctx, typ string, t *Transaction, err error, ok int, start time.Time) {
+	if t == nil {
+		return
+	}
+	status, resp := ok, any(t)
+	if err != nil {
+		status, resp = fiber.StatusInternalServerError, fiber.Map{"error": err.Error()}
+		var fe *fiber.Error
+		if errors.As(outboundErr(err), &fe) {
+			status = fe.Code
+		}
+	}
+	body, _ := json.Marshal(resp)
+	req := json.RawMessage(c.Body())
+	if !json.Valid(req) {
+		req = nil
+	}
+	h.logs.Record(c.Context(), apilog.Log{
+		TransactionID: t.ID, Type: typ, Method: c.Method(), URL: c.OriginalURL(),
+		RequestBody: req, ResponseBody: body, StatusCode: status, DurationMs: int(time.Since(start).Milliseconds()),
+	})
+}
+
+// CreateQRIS membuat transaksi QRIS lewat PG (outbound).
+func (h *Handler) CreateQRIS(c fiber.Ctx) error {
+	merchantID, err := h.merchantID(c)
+	if err != nil {
+		return err
+	}
+
+	var request CreateRequest
+	if err := c.Bind().Body(&request); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	start := time.Now()
+	t, err := h.service.CreateQRIS(c.Context(), merchantID, request)
+	h.logInbound(c, apilog.InboundCreate, t, err, fiber.StatusCreated, start)
+	if err != nil {
+		return outboundErr(err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(t)
+}
+
+// Check menanyakan status terbaru ke PG.
+func (h *Handler) Check(c fiber.Ctx) error {
+	merchantID, err := h.merchantID(c)
+	if err != nil {
+		return err
+	}
+	id, err := parseID(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+
+	start := time.Now()
+	t, err := h.service.Check(c.Context(), merchantID, id)
+	h.logInbound(c, apilog.InboundCheck, t, err, fiber.StatusOK, start)
+	if err != nil {
+		return outboundErr(err)
+	}
+	return c.JSON(t)
+}
+
+func (h *Handler) Refund(c fiber.Ctx) error {
+	merchantID, err := h.merchantID(c)
+	if err != nil {
+		return err
+	}
+	id, err := parseID(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.Bind().Body(&body) // reason opsional
+
+	start := time.Now()
+	t, err := h.service.Refund(c.Context(), merchantID, id, body.Reason)
+	h.logInbound(c, apilog.InboundRefund, t, err, fiber.StatusOK, start)
+	if err != nil {
+		return outboundErr(err)
+	}
+	return c.JSON(t)
+}
+
+// Notify = webhook payment notify dari PG (publik, diamankan X-SIGNATURE HMAC). Response format SNAP.
+func (h *Handler) Notify(secret string) fiber.Handler {
+	reply := func(c fiber.Ctx, status int, code, msg string) error {
+		return c.Status(status).JSON(gateway.Base{ResponseCode: code, ResponseMessage: msg})
+	}
+
+	return func(c fiber.Ctx) error {
+		start := time.Now()
+		if !gateway.ValidSignature(secret, c.Body(), c.Get("X-SIGNATURE")) {
+			return reply(c, fiber.StatusUnauthorized, "4015200", "Unauthorized. [Signature]")
+		}
+
+		var n gateway.NotifyReq
+		if err := json.Unmarshal(c.Body(), &n); err != nil || n.OriginalPartnerReferenceNo == "" {
+			return reply(c, fiber.StatusBadRequest, "4005200", "Invalid Mandatory Field")
+		}
+
+		id, err := h.service.Notify(c.Context(), n)
+		if errors.Is(err, ErrNotFound) {
+			return reply(c, fiber.StatusNotFound, "4045201", "Transaction Not Found")
+		}
+		if err != nil {
+			return err
+		}
+
+		response, _ := json.Marshal(gateway.Base{ResponseCode: "2005200", ResponseMessage: "Successful"})
+		h.logs.Record(c.Context(), apilog.Log{
+			TransactionID: id, Type: apilog.Callback, Method: c.Method(), URL: c.OriginalURL(),
+			RequestBody: json.RawMessage(c.Body()), ResponseBody: response,
+			StatusCode: fiber.StatusOK, DurationMs: int(time.Since(start).Milliseconds()),
+		})
+		return c.Send(response)
+	}
 }
 
 func parseID(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }

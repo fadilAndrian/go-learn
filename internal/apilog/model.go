@@ -10,6 +10,8 @@ const (
 	OutboundCreate = "outbound_create"
 	InboundCheck   = "inbound_check"
 	OutboundCheck  = "outbound_check"
+	InboundRefund  = "inbound_refund"
+	OutboundRefund = "outbound_refund"
 	Callback       = "callback"
 )
 
