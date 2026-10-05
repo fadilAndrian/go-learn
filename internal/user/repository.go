@@ -20,8 +20,8 @@ func (r *Repository) FindByID(ctx context.Context, id int64) (*User, error) {
 	user := &User{}
 
 	err := r.db.QueryRow(ctx,
-		`SELECT id, name, email, password FROM users WHERE id = $1 AND deleted_at IS NULL`, id,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.Password)
+		`SELECT id, COALESCE(merchant_id, 0), name, email, password FROM users WHERE id = $1 AND deleted_at IS NULL`, id,
+	).Scan(&user.ID, &user.MerchantID, &user.Name, &user.Email, &user.Password)
 
 	if err != nil {
 		return nil, err
