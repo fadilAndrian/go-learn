@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"github.com/fadilAndrian/go-learn/internal/apilog"
 	"github.com/fadilAndrian/go-learn/internal/gateway"
@@ -87,7 +88,21 @@ func main() {
 
 	logs := apilog.NewService(apilog.NewRepository(db))
 	gw := gateway.NewClient(pgBase, os.Getenv("PG_PARTNER_ID"))
-	trxHandler := transaction.NewHandler(transaction.NewService(transaction.NewRepository(db), gw, logs), userService, logs)
+
+	trxSvc := transaction.NewService(transaction.NewRepository(db), gw, logs)
+	trxHandler := transaction.NewHandler(trxSvc, userService, logs)
+
+	// scheduler cek status pending ke PG; PG_CHECK_INTERVAL default 1m, "0" = mati
+	every := time.Minute
+	if v := os.Getenv("PG_CHECK_INTERVAL"); v != "" {
+		if every, err = time.ParseDuration(v); err != nil {
+			fatal("PG_CHECK_INTERVAL", err)
+		}
+	}
+	if every > 0 {
+		// ponytail: ctx Background, goroutine mati bersama proses. Pakai signal.NotifyContext + Fiber GracefulContext kalau butuh graceful shutdown.
+		go trxSvc.RunChecker(context.Background(), every)
+	}
 
 	// webhook dari PG: publik, auth lewat X-SIGNATURE
 	app.Post("/webhooks/qris/v1.0/qr/qr-mpm-notify", trxHandler.Notify(webhookSecret))
