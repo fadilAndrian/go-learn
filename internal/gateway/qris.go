@@ -43,6 +43,7 @@ type GenerateRes struct {
 	PartnerReferenceNo string `json:"partnerReferenceNo"`
 	QRContent          string `json:"qrContent"`
 	TerminalID         string `json:"terminalId"`
+	ExpiredTime        string `json:"expiredTime"` // RFC3339; ponytail: nama field asumsi, sesuaikan dengan PG asli
 }
 
 type QueryReq struct {

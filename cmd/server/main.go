@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"github.com/fadilAndrian/go-learn/internal/apilog"
 	"github.com/fadilAndrian/go-learn/internal/gateway"
@@ -17,6 +18,8 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
 
 // fatal log error lalu keluar, pengganti log.Fatal
@@ -87,7 +90,24 @@ func main() {
 
 	logs := apilog.NewService(apilog.NewRepository(db))
 	gw := gateway.NewClient(pgBase, os.Getenv("PG_PARTNER_ID"))
-	trxHandler := transaction.NewHandler(transaction.NewService(transaction.NewRepository(db), gw, logs), userService, logs)
+	trxService := transaction.NewService(transaction.NewRepository(db), gw, logs)
+	trxHandler := transaction.NewHandler(trxService, userService, logs)
+
+	// background job: sweep pending → cek ke PG. Tabel river_* dimigrasi lewat `river migrate-up` (terpisah dari goose).
+	workers := river.NewWorkers()
+	transaction.AddWorkers(workers, trxService)
+	jobs, err := river.NewClient(riverpgxv5.New(db), &river.Config{
+		Queues:       map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 5}},
+		Workers:      workers,
+		PeriodicJobs: []*river.PeriodicJob{transaction.SweepEvery(time.Minute)},
+	})
+	if err != nil {
+		fatal("river client", err)
+	}
+	if err := jobs.Start(context.Background()); err != nil {
+		fatal("river start", err)
+	}
+	defer jobs.Stop(context.Background())
 
 	// webhook dari PG: publik, auth lewat X-SIGNATURE
 	app.Post("/webhooks/qris/v1.0/qr/qr-mpm-notify", trxHandler.Notify(webhookSecret))

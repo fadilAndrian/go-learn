@@ -25,6 +25,9 @@ var (
 	ErrNotRefundable  = errors.New("only paid transactions can be refunded")
 )
 
+// DefaultTTL = batas kadaluwarsa kalau PG tidak mengirim expired_at.
+const DefaultTTL = time.Hour
+
 type Service struct {
 	repository *Repository
 	gateway    *gateway.Client
@@ -64,12 +67,16 @@ func (s *Service) CreateQRIS(ctx context.Context, merchantID int64, req CreateRe
 	res, call, err := s.gateway.Generate(strconv.FormatInt(merchantID, 10), t.ReferenceNo, t.Amount)
 	s.record(ctx, t.ID, apilog.OutboundCreate, call)
 	if err != nil {
-		_, _ = s.repository.Update(ctx, t.ID, "", StatusFailed, "", nil)
+		_, _ = s.repository.Update(ctx, t.ID, "", StatusFailed, "", nil, nil)
 		t.Status = StatusFailed
 		return t, err // t dikembalikan agar handler bisa mencatat log inbound dengan id-nya
 	}
 
-	if _, err := s.repository.Update(ctx, t.ID, "", "", res.ReferenceNo, map[string]any{"qr_content": res.QRContent}); err != nil {
+	var expiredAt *time.Time
+	if e, err := time.Parse(time.RFC3339, res.ExpiredTime); err == nil {
+		expiredAt = &e
+	}
+	if _, err := s.repository.Update(ctx, t.ID, "", "", res.ReferenceNo, expiredAt, map[string]any{"qr_content": res.QRContent}); err != nil {
 		return nil, err
 	}
 	return s.repository.FindByID(ctx, merchantID, t.ID)
@@ -88,8 +95,12 @@ func (s *Service) Check(ctx context.Context, merchantID, id int64) (*Transaction
 		return nil, err
 	}
 
-	if st := statusFromSNAP(res.LatestTransactionStatus); st != StatusPending {
-		if _, err := s.repository.Update(ctx, t.ID, StatusPending, st, "", nil); err != nil {
+	st := statusFromSNAP(res.LatestTransactionStatus)
+	if st == StatusPending && t.expired(time.Now()) {
+		st = StatusFailed // PG masih pending tapi QR sudah kadaluwarsa
+	}
+	if st != StatusPending {
+		if _, err := s.repository.Update(ctx, t.ID, StatusPending, st, "", nil, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -113,7 +124,7 @@ func (s *Service) Refund(ctx context.Context, merchantID, id int64, reason strin
 	}
 
 	patch := map[string]any{"refund_no": res.RefundNo, "refunded_at": time.Now().UTC().Format(time.RFC3339)}
-	if _, err := s.repository.Update(ctx, t.ID, StatusPaid, StatusRefunded, "", patch); err != nil {
+	if _, err := s.repository.Update(ctx, t.ID, StatusPaid, StatusRefunded, "", nil, patch); err != nil {
 		return nil, err
 	}
 	return s.repository.FindByID(ctx, merchantID, id)
@@ -126,7 +137,7 @@ func (s *Service) Notify(ctx context.Context, n gateway.NotifyReq) (int64, error
 		return 0, err
 	}
 	if st := statusFromSNAP(n.LatestTransactionStatus); st != StatusPending {
-		_, err = s.repository.Update(ctx, t.ID, StatusPending, st, "", nil)
+		_, err = s.repository.Update(ctx, t.ID, StatusPending, st, "", nil, nil)
 	}
 	return t.ID, err
 }
