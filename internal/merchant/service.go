@@ -1,6 +1,9 @@
 package merchant
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 type Service struct {
 	repository *Repository
@@ -10,9 +13,9 @@ func NewService(repository *Repository) *Service {
 	return &Service{repository: repository}
 }
 
-func (s *Service) Register(ctx context.Context, request CreateMerchantRequest) (*Merchant, error) {
+func (s *Service) Create(ctx context.Context, request StoreRequest) (*Merchant, error) {
 	m := &Merchant{
-		Name:        request.Name,
+		Name:        strings.TrimSpace(request.Name),
 		Phone:       request.Phone,
 		Address:     request.Address,
 		Description: request.Description,
@@ -24,13 +27,13 @@ func (s *Service) Register(ctx context.Context, request CreateMerchantRequest) (
 }
 
 // Update mengganti hanya field request yang tidak kosong.
-func (s *Service) Update(ctx context.Context, id int64, request UpdateMerchantRequest) (*Merchant, error) {
+func (s *Service) Update(ctx context.Context, id int64, request UpdateRequest) (*Merchant, error) {
 	m, err := s.repository.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if request.Name != "" {
-		m.Name = request.Name
+	if name := strings.TrimSpace(request.Name); name != "" {
+		m.Name = name
 	}
 	if request.Phone != "" {
 		m.Phone = request.Phone

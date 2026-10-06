@@ -1,23 +1,12 @@
 package merchant
 
+// Merchant = satu baris tabel merchants (≈ Eloquent model).
+// Sengaja tanpa tag json: data keluar ke client hanya lewat MerchantResource,
+// jadi kolom baru di tabel tidak otomatis ikut terkirim.
 type Merchant struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Phone       string `json:"phone"`
-	Address     string `json:"address"`
-	Description string `json:"description"`
-}
-
-type CreateMerchantRequest struct {
-	Name        string `json:"name"`
-	Phone       string `json:"phone"`
-	Address     string `json:"address"`
-	Description string `json:"description"`
-}
-
-type UpdateMerchantRequest struct {
-	Name        string `json:"name"`
-	Phone       string `json:"phone"`
-	Address     string `json:"address"`
-	Description string `json:"description"`
+	ID          int64
+	Name        string
+	Phone       string
+	Address     string
+	Description string
 }

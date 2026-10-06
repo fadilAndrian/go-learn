@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/fadilAndrian/go-learn/internal/admin"
 	"github.com/fadilAndrian/go-learn/internal/apilog"
 	"github.com/fadilAndrian/go-learn/internal/gateway"
 	"github.com/fadilAndrian/go-learn/internal/merchant"
@@ -104,12 +105,26 @@ func main() {
 	// admin-api
 	app.Get("/logs/:logId", user.Auth(jwtSecret), trxHandler.LogDetail)
 
+	// dashboard admin: auth pakai cookie sesi (bukan Bearer token user)
+	adminKey := os.Getenv("ADMIN_KEY")
+	if adminKey == "" {
+		fatal("ADMIN_KEY is not set", nil)
+	}
+	adminCfg := admin.Config{
+		Key:          adminKey,
+		Secret:       jwtSecret,
+		SecureCookie: os.Getenv("ADMIN_COOKIE_SECURE") != "false",
+	}
+	adminHandler := admin.NewHandler(adminCfg)
+	app.Post("/admin/login", adminHandler.Login)
+	app.Post("/admin/logout", adminHandler.Logout)
+
 	merchantHandler := merchant.NewHandler(merchant.NewService(merchant.NewRepository(db)))
-	// admin-api
-	app.Post("/merchants", merchantHandler.Register)
-	app.Get("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Detail)
-	app.Put("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Update)
-	app.Delete("/merchants/:id", user.Auth(jwtSecret), merchantHandler.Delete)
+	merchants := app.Group("/admin/merchants", admin.Auth(adminCfg))
+	merchants.Post("/", merchantHandler.Store)
+	merchants.Get("/:id", merchantHandler.Show)
+	merchants.Put("/:id", merchantHandler.Update)
+	merchants.Delete("/:id", merchantHandler.Destroy)
 
 	// arahin ke port 3000
 	if err := app.Listen(":3000"); err != nil {
