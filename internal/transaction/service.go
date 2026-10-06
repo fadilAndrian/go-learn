@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"time"
 
@@ -25,6 +24,9 @@ var (
 	ErrInvalidAmount  = errors.New("amount must be a number greater than 0")
 	ErrNotRefundable  = errors.New("only paid transactions can be refunded")
 )
+
+// DefaultTTL = batas kadaluwarsa kalau PG tidak mengirim expired_at.
+const DefaultTTL = time.Hour
 
 type Service struct {
 	repository *Repository
@@ -65,47 +67,22 @@ func (s *Service) CreateQRIS(ctx context.Context, merchantID int64, req CreateRe
 	res, call, err := s.gateway.Generate(strconv.FormatInt(merchantID, 10), t.ReferenceNo, t.Amount)
 	s.record(ctx, t.ID, apilog.OutboundCreate, call)
 	if err != nil {
-		_, _ = s.repository.Update(ctx, t.ID, "", StatusFailed, "", nil)
+		_, _ = s.repository.Update(ctx, t.ID, "", StatusFailed, "", nil, nil)
 		t.Status = StatusFailed
 		return t, err // t dikembalikan agar handler bisa mencatat log inbound dengan id-nya
 	}
 
-	if _, err := s.repository.Update(ctx, t.ID, "", "", res.ReferenceNo, map[string]any{"qr_content": res.QRContent}); err != nil {
+	var expiredAt *time.Time
+	if e, err := time.Parse(time.RFC3339, res.ExpiredTime); err == nil {
+		expiredAt = &e
+	}
+	if _, err := s.repository.Update(ctx, t.ID, "", "", res.ReferenceNo, expiredAt, map[string]any{"qr_content": res.QRContent}); err != nil {
 		return nil, err
 	}
 	return s.repository.FindByID(ctx, merchantID, t.ID)
 }
 
 // Check tanya status ke PG; hanya transaksi pending yang berubah (paid/refunded tidak ditimpa).
-// CheckPending query status ke PG untuk semua transaksi pending; error satu transaksi tidak menghentikan yang lain.
-func (s *Service) CheckPending(ctx context.Context) {
-	// ponytail: batch 100 per tick, tanpa lock antar-instance. Tambah kalau jalan >1 instance.
-	list, err := s.repository.ListPending(ctx, time.Now().Add(-60*time.Second), 100)
-	if err != nil {
-		slog.Warn("checker: list pending", "err", err)
-		return
-	}
-	for _, t := range list {
-		if _, err := s.Check(ctx, t.MerchantID, t.ID); err != nil {
-			slog.Warn("checker: check", "id", t.ID, "err", err)
-		}
-	}
-}
-
-// RunChecker jalankan CheckPending tiap every sampai ctx selesai.
-func (s *Service) RunChecker(ctx context.Context, every time.Duration) {
-	tick := time.NewTicker(every)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			s.CheckPending(ctx)
-		}
-	}
-}
-
 func (s *Service) Check(ctx context.Context, merchantID, id int64) (*Transaction, error) {
 	t, err := s.repository.FindByID(ctx, merchantID, id)
 	if err != nil || t.ProviderRef == "" {
@@ -118,8 +95,12 @@ func (s *Service) Check(ctx context.Context, merchantID, id int64) (*Transaction
 		return nil, err
 	}
 
-	if st := statusFromSNAP(res.LatestTransactionStatus); st != StatusPending {
-		if _, err := s.repository.Update(ctx, t.ID, StatusPending, st, "", nil); err != nil {
+	st := statusFromSNAP(res.LatestTransactionStatus)
+	if st == StatusPending && t.expired(time.Now()) {
+		st = StatusFailed // PG masih pending tapi QR sudah kadaluwarsa
+	}
+	if st != StatusPending {
+		if _, err := s.repository.Update(ctx, t.ID, StatusPending, st, "", nil, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -143,7 +124,7 @@ func (s *Service) Refund(ctx context.Context, merchantID, id int64, reason strin
 	}
 
 	patch := map[string]any{"refund_no": res.RefundNo, "refunded_at": time.Now().UTC().Format(time.RFC3339)}
-	if _, err := s.repository.Update(ctx, t.ID, StatusPaid, StatusRefunded, "", patch); err != nil {
+	if _, err := s.repository.Update(ctx, t.ID, StatusPaid, StatusRefunded, "", nil, patch); err != nil {
 		return nil, err
 	}
 	return s.repository.FindByID(ctx, merchantID, id)
@@ -156,7 +137,7 @@ func (s *Service) Notify(ctx context.Context, n gateway.NotifyReq) (int64, error
 		return 0, err
 	}
 	if st := statusFromSNAP(n.LatestTransactionStatus); st != StatusPending {
-		_, err = s.repository.Update(ctx, t.ID, StatusPending, st, "", nil)
+		_, err = s.repository.Update(ctx, t.ID, StatusPending, st, "", nil, nil)
 	}
 	return t.ID, err
 }

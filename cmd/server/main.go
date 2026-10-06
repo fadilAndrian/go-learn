@@ -18,6 +18,8 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
 
 // fatal log error lalu keluar, pengganti log.Fatal
@@ -88,21 +90,24 @@ func main() {
 
 	logs := apilog.NewService(apilog.NewRepository(db))
 	gw := gateway.NewClient(pgBase, os.Getenv("PG_PARTNER_ID"))
+	trxService := transaction.NewService(transaction.NewRepository(db), gw, logs)
+	trxHandler := transaction.NewHandler(trxService, userService, logs)
 
-	trxSvc := transaction.NewService(transaction.NewRepository(db), gw, logs)
-	trxHandler := transaction.NewHandler(trxSvc, userService, logs)
-
-	// scheduler cek status pending ke PG; PG_CHECK_INTERVAL default 1m, "0" = mati
-	every := time.Minute
-	if v := os.Getenv("PG_CHECK_INTERVAL"); v != "" {
-		if every, err = time.ParseDuration(v); err != nil {
-			fatal("PG_CHECK_INTERVAL", err)
-		}
+	// background job: sweep pending → cek ke PG. Tabel river_* dimigrasi lewat `river migrate-up` (terpisah dari goose).
+	workers := river.NewWorkers()
+	transaction.AddWorkers(workers, trxService)
+	jobs, err := river.NewClient(riverpgxv5.New(db), &river.Config{
+		Queues:       map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 5}},
+		Workers:      workers,
+		PeriodicJobs: []*river.PeriodicJob{transaction.SweepEvery(time.Minute)},
+	})
+	if err != nil {
+		fatal("river client", err)
 	}
-	if every > 0 {
-		// ponytail: ctx Background, goroutine mati bersama proses. Pakai signal.NotifyContext + Fiber GracefulContext kalau butuh graceful shutdown.
-		go trxSvc.RunChecker(context.Background(), every)
+	if err := jobs.Start(context.Background()); err != nil {
+		fatal("river start", err)
 	}
+	defer jobs.Stop(context.Background())
 
 	// webhook dari PG: publik, auth lewat X-SIGNATURE
 	app.Post("/webhooks/qris/v1.0/qr/qr-mpm-notify", trxHandler.Notify(webhookSecret))

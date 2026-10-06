@@ -20,13 +20,13 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 }
 
 const columns = `id, merchant_id, reference_no, COALESCE(provider_ref, ''), amount::text, status,
-	COALESCE(payment_method, ''), COALESCE(description, ''), additional_info, created_at, updated_at`
+	COALESCE(payment_method, ''), COALESCE(description, ''), additional_info, expired_at, created_at, updated_at`
 
 type scanner interface{ Scan(...any) error }
 
 func scan(row scanner, t *Transaction) error {
 	return row.Scan(&t.ID, &t.MerchantID, &t.ReferenceNo, &t.ProviderRef, &t.Amount, &t.Status,
-		&t.PaymentMethod, &t.Description, &t.AdditionalInfo, &t.CreatedAt, &t.UpdatedAt)
+		&t.PaymentMethod, &t.Description, &t.AdditionalInfo, &t.ExpiredAt, &t.CreatedAt, &t.UpdatedAt)
 }
 
 func (r *Repository) Create(ctx context.Context, merchantID int64, referenceNo string, req CreateRequest) (*Transaction, error) {
@@ -79,9 +79,9 @@ func (r *Repository) FindByReference(ctx context.Context, referenceNo string) (*
 	return t, nil
 }
 
-// Update ubah status/provider_ref (string kosong = tidak diubah) dan merge patch ke additional_info.
+// Update ubah status/provider_ref (string kosong = tidak diubah), expired_at (nil = tidak diubah), dan merge patch ke additional_info.
 // from non-kosong = hanya jika status saat ini == from (guard idempotensi webhook); return false kalau tidak ada baris berubah.
-func (r *Repository) Update(ctx context.Context, id int64, from, status, providerRef string, patch map[string]any) (bool, error) {
+func (r *Repository) Update(ctx context.Context, id int64, from, status, providerRef string, expiredAt *time.Time, patch map[string]any) (bool, error) {
 	p, _ := json.Marshal(patch) // nil map → "null"
 	if patch == nil {
 		p = []byte("{}")
@@ -90,32 +90,11 @@ func (r *Repository) Update(ctx context.Context, id int64, from, status, provide
 		`UPDATE transactions SET
 		   status = COALESCE(NULLIF($3, ''), status),
 		   provider_ref = COALESCE(NULLIF($4, ''), provider_ref),
+		   expired_at = COALESCE($6, expired_at),
 		   additional_info = COALESCE(additional_info, '{}'::jsonb) || $5::jsonb,
 		   updated_at = now()
-		 WHERE id = $1 AND ($2 = '' OR status = $2)`, id, from, status, providerRef, p)
+		 WHERE id = $1 AND ($2 = '' OR status = $2)`, id, from, status, providerRef, p, expiredAt)
 	return tag.RowsAffected() > 0, err
-}
-
-// ListPending lintas merchant: pending yang sudah dikirim ke PG dan tidak berubah sejak olderThan. Dipakai scheduler.
-func (r *Repository) ListPending(ctx context.Context, olderThan time.Time, limit int) ([]Transaction, error) {
-	rows, err := r.db.Query(ctx,
-		`SELECT `+columns+` FROM transactions
-		 WHERE status = 'pending' AND provider_ref IS NOT NULL AND updated_at < $1
-		 ORDER BY updated_at LIMIT $2`, olderThan, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	list := []Transaction{}
-	for rows.Next() {
-		var t Transaction
-		if err := scan(rows, &t); err != nil {
-			return nil, err
-		}
-		list = append(list, t)
-	}
-	return list, rows.Err()
 }
 
 // List status kosong = semua status.
@@ -138,6 +117,31 @@ func (r *Repository) List(ctx context.Context, merchantID int64, status string, 
 			return nil, err
 		}
 		list = append(list, t)
+	}
+	return list, rows.Err()
+}
+
+// PendingRef = transaksi pending milik merchant yang perlu dicek ulang ke PG.
+type PendingRef struct{ ID, MerchantID int64 }
+
+// ListStalePending pending yang sudah punya provider_ref dan lebih tua dari olderThan (batas sweep), maksimal limit.
+func (r *Repository) ListStalePending(ctx context.Context, olderThan time.Duration, limit int) ([]PendingRef, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT id, merchant_id FROM transactions
+		 WHERE status = 'pending' AND provider_ref IS NOT NULL AND created_at < now() - make_interval(secs => $1)
+		 ORDER BY id LIMIT $2`, olderThan.Seconds(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []PendingRef
+	for rows.Next() {
+		var p PendingRef
+		if err := rows.Scan(&p.ID, &p.MerchantID); err != nil {
+			return nil, err
+		}
+		list = append(list, p)
 	}
 	return list, rows.Err()
 }

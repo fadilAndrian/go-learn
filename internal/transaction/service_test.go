@@ -16,14 +16,22 @@ func TestCreateRejectsBadAmount(t *testing.T) {
 	}
 }
 
-func TestRunCheckerStopsOnCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	done := make(chan struct{})
-	go func() { NewService(nil, nil, nil).RunChecker(ctx, time.Hour); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("RunChecker did not stop")
+func TestExpired(t *testing.T) {
+	now := time.Now()
+	past, future := now.Add(-time.Minute), now.Add(time.Minute)
+	cases := []struct {
+		name string
+		t    Transaction
+		want bool
+	}{
+		{"expired_at lewat", Transaction{ExpiredAt: &past, CreatedAt: now}, true},
+		{"expired_at belum", Transaction{ExpiredAt: &future, CreatedAt: now.Add(-2 * time.Hour)}, false},
+		{"null, lewat default 1 jam", Transaction{CreatedAt: now.Add(-2 * time.Hour)}, true},
+		{"null, belum 1 jam", Transaction{CreatedAt: now.Add(-time.Minute)}, false},
+	}
+	for _, c := range cases {
+		if got := c.t.expired(now); got != c.want {
+			t.Fatalf("%s: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }

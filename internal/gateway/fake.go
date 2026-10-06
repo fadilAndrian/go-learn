@@ -43,7 +43,8 @@ func RegisterFake(app *fiber.App, notifyURL, secret string) {
 		return c.JSON(GenerateRes{
 			Base:        Base{"2004700", "Successful"},
 			ReferenceNo: ref, PartnerReferenceNo: req.PartnerReferenceNo, TerminalID: req.TerminalID,
-			QRContent: "00020101021226670016COM.NOBUBANK.WWW01189360050300000879140214" + req.PartnerReferenceNo + "5204581253033605802ID5909FAKE QRIS6007JAKARTA6304ABCD",
+			ExpiredTime: time.Now().Add(time.Hour).Format(time.RFC3339),
+			QRContent:   "00020101021226670016COM.NOBUBANK.WWW01189360050300000879140214" + req.PartnerReferenceNo + "5204581253033605802ID5909FAKE QRIS6007JAKARTA6304ABCD",
 		})
 	})
 

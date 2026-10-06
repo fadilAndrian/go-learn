@@ -15,6 +15,7 @@ type Transaction struct {
 	PaymentMethod  string          `json:"payment_method"`
 	Description    string          `json:"description"`
 	AdditionalInfo json.RawMessage `json:"additional_info"`
+	ExpiredAt      *time.Time      `json:"expired_at"` // null = PG tidak mengirim; lihat DefaultTTL
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 }
@@ -24,4 +25,11 @@ type CreateRequest struct {
 	PaymentMethod  string          `json:"payment_method"`
 	Description    string          `json:"description"`
 	AdditionalInfo json.RawMessage `json:"additional_info"`
+}
+
+func (t *Transaction) expired(now time.Time) bool {
+	if t.ExpiredAt != nil {
+		return now.After(*t.ExpiredAt)
+	}
+	return now.After(t.CreatedAt.Add(DefaultTTL))
 }
