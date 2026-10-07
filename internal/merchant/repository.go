@@ -8,8 +8,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrNotFound = errors.New("merchant not found")
-
 type Repository struct {
 	db *pgxpool.Pool
 }
